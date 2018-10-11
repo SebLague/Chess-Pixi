@@ -1,9 +1,4 @@
-let type = "WebGL"
-if(!PIXI.utils.isWebGLSupported()){
-  type = "canvas"
-}
-
-// Aliases:
+// Aliases://
 var TextureCache = PIXI.utils.TextureCache;
 var Point = PIXI.Point;
 var nativeSize = 800;
@@ -24,16 +19,17 @@ document.body.appendChild(app.view);
 PIXI.loader.add("sprites/pieces.png").load(setup);
 
 // Behaviour:
-var useLocalFile = true;
+var useLocalFile = false;//
 var blackPiecesInactive = true;
 var resetTime = 750;
 var blackMoveDelay = 350;
+const timeWarningStartTime = 3;
 
-// Game type:
-const suddenDeathName = 'suddendeath';
-const timeLimitName = 'timelimit';
-var mode = 'suddendeath'; // endless, suddendeath, timelimit
-var time = 0;
+// Game options:
+var suddenDeath = false;
+var gameIsTimed = false;
+var resetTimerOnSolve = false;
+var startTime = 180;//
 
 // Appearance
 var lightCol = 0xeed3ac;
@@ -43,7 +39,14 @@ var highlightCol_dark = 0xceb244;
 var checkmateHighlight_light = 0xed6a53;
 var checkmateHighlight_dark = 0xd7543e;
 var size = nativeSize/8;
+var timeAlertCols = [0xffa79e,0xff6a5b,0xff3c28];
 const numSolvedTextStyle = new PIXI.TextStyle({
+    fill: "#ebebeb",
+    fontFamily: "\"Lucida Console\", Monaco, monospace",
+    fontSize: 30,
+    fontWeight: "bold"
+});
+const timerTextStyle = new PIXI.TextStyle({
     fill: "#ebebeb",
     fontFamily: "\"Lucida Console\", Monaco, monospace",
     fontSize: 30,
@@ -59,34 +62,52 @@ const loadTextStyle = new PIXI.TextStyle({
 
 // Internal
 var startFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
-var pieceOrder = "KQBNRP"
+var pieceOrder = "KQBNRP";
 var files = "abcdefgh";
 
-var puzzlesUrl = 'http://sebastianlague.site/chess/getpuzzle.php';
+var puzzlesUrl = 'http://sebastianlague.site/chess/mate-trainer/getpuzzles.php';
 
 var pieceTextures;
 var selectedSprite;
-var boardContainer;
-var pieceContainer;
-var highlightContainer;
-var textContainer;
 
 var activePuzzles;
 var preloadedPuzzles;
 var puzzleIndex = 0;
-var chess;
 var fromPoint;
 var allSprites = new Array(64);
 var inputDisabled;
 var holdingSprite;
 var blackKingCoord;
-var loadingText;
-var numSolvedText;
-var numSolved = 0;
 
-//import {fetch} from "./fetch.js";
+var numSolved = 0;
+var timerValue;
+var timerPaused = false;
+var lastUpdateTime;
+var gameRunning = false;
+var lastTimeWarningSecond = timeWarningStartTime;
+var soundOn = true;
 
 function setup() {
+	
+	// Get url params
+	if (GetURLParameter('suddenDeath') == 'true') {
+		suddenDeath = true;
+	}
+	if (GetURLParameter('timed') == 'true') {
+		gameIsTimed = true;
+	}
+	if (GetURLParameter('resetTimerOnSolve') == 'true') {
+		resetTimerOnSolve = true;
+	}
+	let startTimeParam = parseFloat(GetURLParameter('startTime'));
+	if (!isNaN(startTimeParam)) {
+		startTime = startTimeParam;
+	}
+	
+	if (GetURLParameter('sound') == 'false') {
+		soundOn = false;
+	}
+	
 	document.oncontextmenu = document.body.oncontextmenu = function(event) {onRightClick(event);};
 	
     // Draw board
@@ -112,8 +133,8 @@ function setup() {
 	app.stage.addChild(boardContainer);
     boardContainer.addChild(graphics);
 	boardContainer.addChild(highlightContainer);
-	boardContainer.addChild(pieceContainer);
-	
+	//boardContainer.addChild(pieceContainer);
+	app.stage.addChild(pieceContainer);
 	app.stage.addChild(textContainer);
 	
     // Pieces in order: King, Queen, Bishop, Knight, Rook, Pawn [White,Black]
@@ -123,8 +144,7 @@ function setup() {
     }
 
     // Draw pieces
-    let pieceSize = size*1;
-    let spriteSize = 2000/6.0;
+    let spriteSize = 1000/6.0;
 
     for (let i = 0; i <= 1; i ++) {
         for (let j = 0; j < 6; j++) {
@@ -139,39 +159,59 @@ function setup() {
 	
 	// text
 	numSolvedText = new PIXI.Text('solved: 0', numSolvedTextStyle);
-	loadingText = new PIXI.Text('fetching puzzles...', loadTextStyle);
+	loadingText = new PIXI.Text('fetching puzzles...', loadTextStyle);//
 	
-	if (mode == suddenDeathName || mode == timeLimitName) {
-		timerText = new PIXI.Text('timer', numSolvedTextStyle);
-		textContainer.addChild(timerText);
+
+	timerText = new PIXI.Text('', timerTextStyle);
+	if (gameIsTimed) {
+		timerText.text = 'Time: 0.0';
 	}
+	textContainer.addChild(timerText);
 	
 	textContainer.addChild(numSolvedText);
 	textContainer.addChild(loadingText);
 	
-	
-    //app.ticker.add(delta => gameLoop(delta));
 	window.addEventListener('resize', resize);
 	resize();
 	
 	if (useLocalFile) {
 		activePuzzles = matestrings.split('\n');
-		loadNextPuzzle();
-		loadingText.text = "";
+		onPuzzlesLoaded();
 	}
 	else {
 		// fetch initial puzzle set
 		fetch(puzzlesUrl).then((response) => {
 			response.text().then((response) => {
 				activePuzzles = response.split('<br>');
-				preloadPuzzles();
-				loadingText.text = "";
-				loadNextPuzzle();
+				onPuzzlesLoaded();
 			});
 		});
 	}
+	
+	
+	puzzleCorrectSound = new Audio('audio/PuzzleCorrect.mp3');
+	puzzleFailedSound = new Audio('audio/PuzzleFailed.mp3');
+	moveSound = new Audio('audio/Move.mp3');
+	timeOutSound = new Audio('audio/TimeOut.mp3');
+	timeWarningSound = new Audio('audio/TimeWarning.mp3');
+	
 }
 
+function onPuzzlesLoaded() {
+	if (!useLocalFile) {
+		preloadPuzzles();
+	}//
+	loadingText.text = "";
+	loadNextPuzzle();
+	
+	if (gameIsTimed) {
+		timerValue = startTime;
+	}
+	
+	gameRunning = true;
+	lastUpdateTime = Date.now();
+	app.ticker.add(() => timeLoop());
+}
 
 function validateMateInOne(fen) {
 	let chess = new Chess(fen);
@@ -207,28 +247,20 @@ function resize() {
 
 	let scale = (minDim)/nativeSize * scalePercent;
 	boardContainer.scale.set(scale);
-	boardContainer.position.set((w-boardContainer.width)/2,(h-boardContainer.height)/2);
+	pieceContainer.scale.set(scale);
+	let dstToTopEdge = (h-boardContainer.height)/2;
+	boardContainer.position.set((w-boardContainer.width)/2,(h-boardContainer.height)/2 - dstToTopEdge*.5);
+	pieceContainer.position.set(boardContainer.position.x,boardContainer.position.y);
 	
 	// position text
 	numSolvedText.scale.set(scale);
+	timerText.scale.set(scale);
 	loadingText.scale.set(scale);
 	
-	let posPercent = .5;
-	
-	if (w>h) {
-	    let boardEdgeRight = boardContainer.position.x + boardContainer.width;
-	    let dstToEdge = w-boardEdgeRight;
-	    let posX = boardEdgeRight + dstToEdge * posPercent - numSolvedText.width/2;
-    	numSolvedText.position.set(posX,boardContainer.position.y + boardContainer.height/2 - numSolvedText.height/2);
-	}
-	else {
-	    let boardEdgeBottom = boardContainer.position.y + boardContainer.height;
-	    let dstToEdge = h-boardEdgeBottom;
-	    let posY = boardEdgeBottom + dstToEdge * posPercent - numSolvedText.height/2;
-    	numSolvedText.position.set(boardContainer.position.x + boardContainer.width/2 - numSolvedText.width/2, posY);
-	}
+	setTextPositions();
 	
 	loadingText.position.set(boardContainer.position.x + boardContainer.width/2 - loadingText.width/2, boardContainer.position.y + boardContainer.height/2 - loadingText.height*1.25);//
+
 	
 }
 
@@ -237,21 +269,33 @@ function loadNextPuzzle() {
 	if (puzzleIndex >= activePuzzles.length) {
 	    puzzleIndex = 0;
 	    activePuzzles = preloadedPuzzles;
-	    preloadPuzzles();
+		
+		if (!useLocalFile) {
+	    	preloadPuzzles();
+		}
 	}
 	
 	loadPuzzle(puzzleIndex);
 }
 
 function loadPuzzle(index) {
+	
 	if (activePuzzles != undefined && activePuzzles.length > index) {
 		let myFen = activePuzzles[index];
 
 		// double check that given position is mate in one, as there are currently some errors with puzzle generator where en-passant is involved.
 		if (validateMateInOne(myFen)) {
+			
 			setBoardFromFen(myFen);
 			chess = new Chess(myFen);
-			inputDisabled = false;
+			
+			if (gameRunning) {
+				inputDisabled = false;
+				if (resetTimerOnSolve) {
+					timerValue = startTime;
+				}
+				timerPaused = false;
+			}
 		}
 		else {
 			loadNextPuzzle();
@@ -262,9 +306,7 @@ function loadPuzzle(index) {
 
 function setBoardFromFen(fen) {
 	clearHighlights();
-	pieceContainer.parent.removeChild(pieceContainer);
-	pieceContainer = new PIXI.Container();
-	boardContainer.addChild(pieceContainer);
+	clearBoard();
 	
     let boardLayout = fen.split(' ')[0];
     let rankLayouts = boardLayout.split('/');
@@ -350,16 +392,28 @@ function tryMakeMove(fromCoord, toCoord) {
 	
 	let moveIsLegal = false;
 	let legalMoves = chess.moves();
+	let legalMove = null;
+	
 	for (let i = 0; i < legalMoves.length; i ++) {
 		let legalMoveFomatted = legalMoves[i].from + '-' + legalMoves[i].to;
 		if (legalMoveFomatted == proposedMove) {
-			chess.move(legalMoves[i]);
+			// if pawn promotion, then multiple moves will match proposed move coords
+			// autopromote to knight if that is check
 			moveIsLegal = true;
-			break;
+			legalMove = legalMoves[i];
+			chess.move(legalMoves[i]);
+			let moveIsCheck = chess.in_check();
+			chess.undo();
+			
+			if (moveIsCheck) {
+				break;
+			}
 		}
 	}
 	
 	if (moveIsLegal) {
+		chess.move(legalMove);
+		lastTimeWarningSecond = timeWarningStartTime;
 		let toIndex = indexFromCoord(toCoord);
 		if (allSprites[toIndex] != null) {
 			allSprites[toIndex].visible = false;
@@ -371,14 +425,11 @@ function tryMakeMove(fromCoord, toCoord) {
 		inputDisabled = true;
 		// Puzzle solved: load next
 		if (chess.in_checkmate()) {
-			numSolved++;
-			numSolvedText.text = 'solved: ' +numSolved;
-			highlightSquare(blackKingCoord, checkmateHighlight_light, checkmateHighlight_dark);
-			setTimeout(function(){loadNextPuzzle()},500);
+			onPuzzleCorrect();
 		}
 		// Puzzle failed: show black response and then reload
 		else {
-			setTimeout(function(){makeLegalMoveAndReset()},blackMoveDelay);
+			onPuzzleFailed();
 		}
 
 		highlightSquare(fromCoord, highlightCol_light, highlightCol_dark);
@@ -434,12 +485,17 @@ function makeLegalMoveAndReset() {
 		}
 		
 		chess.move(bestMove);
+		playSound(moveSound);
+
 		setBoardFromFen(chess.fen());
 		highlightSquare(coordFromAlgebraic(bestMove.from), highlightCol_light, highlightCol_dark);
 		highlightSquare(coordFromAlgebraic(bestMove.to), highlightCol_light, highlightCol_dark);
 	}
 	
-	setTimeout(function(){loadPuzzle(puzzleIndex)},resetTime);
+	if (!suddenDeath) {
+		setTimeout(function(){loadPuzzle(puzzleIndex)},resetTime);
+	}
+	
 }
 
 function onDrag(e){
@@ -461,11 +517,131 @@ function onRightClick(event) {
 }
 
 function onPointerDownOnBoard(e) {
-	let pressedCoord = squareCoordFromPoint(e.data.getLocalPosition(boardContainer));
-	
-    if (selectedSprite != null && indexFromCoord(fromPoint) != indexFromCoord(pressedCoord)) {
-		tryMakeMove(fromPoint, pressedCoord);
+	if (!inputDisabled) {
+		let pressedCoord = squareCoordFromPoint(e.data.getLocalPosition(boardContainer));
+
+		if (selectedSprite != null && indexFromCoord(fromPoint) != indexFromCoord(pressedCoord)) {
+			tryMakeMove(fromPoint, pressedCoord);
+		}
 	}
 }
 
+function timeLoop() {
+	var now = Date.now();
+	var dt = now - lastUpdateTime;
+	lastUpdateTime = now;
+	
+	if (gameRunning) {
+		if (gameIsTimed && !timerPaused) {
+			timerValue -= dt*.001;
+			timerValue = Math.max(0,timerValue);
+			let formattedTimeVal = parseFloat(Math.round(timerValue * 100) / 100).toFixed(1);
+			timerText.text = "Time: " + formattedTimeVal;
+			
+			if (Math.floor(timerValue) < lastTimeWarningSecond) {
+				timerText.style.fill = timeAlertCols[timeWarningStartTime-Math.floor(timerValue)-1];
+				lastTimeWarningSecond = Math.floor(timerValue);
+				
+				playSound(timeWarningSound);
+			}
 
+			if (timerValue === 0) {
+				playSound(timeOutSound);
+				gameOver();
+			}
+
+			setTextPositions();
+		}
+	}
+}
+
+function onPuzzleCorrect() {
+	playSound(puzzleCorrectSound);
+
+	timerText.style.fill = numSolvedTextStyle.fill;
+	
+	numSolved++;
+	numSolvedText.text = 'solved: ' +numSolved;
+	highlightSquare(blackKingCoord, checkmateHighlight_light, checkmateHighlight_dark);
+	setTimeout(function(){loadNextPuzzle()},500);
+	
+	if (resetTimerOnSolve) {
+		timerPaused = true;
+	}
+}
+
+function onPuzzleFailed() {
+	playSound(puzzleFailedSound);
+
+	setTimeout(function(){makeLegalMoveAndReset()},blackMoveDelay);
+	if (suddenDeath) {
+		gameOver();
+	}
+	else {
+		timerText.style.fill = numSolvedTextStyle.fill;
+	}
+}
+
+function clearBoard() {
+	pieceContainer.parent.removeChild(pieceContainer);
+	pieceContainer = new PIXI.Container();
+	app.stage.addChild(pieceContainer);
+	resize();
+}
+
+function gameOver() {
+	gameRunning = false;
+	
+	inputDisabled = true;
+	clearHighlights();
+	
+	if (selectedSprite != null) {
+		let pos = posFromSquareCoord(fromPoint);//
+		selectedSprite.position.set(pos.x,pos.y);
+		selectedSprite = null;
+	}
+	
+	timerText.style.fill = timeAlertCols[timeAlertCols.length-1];
+	timerText.text = "click here to play again";
+	timerText.interactive = true;
+	timerText.on("pointerdown", restartgame);
+	setTextPositions();
+}
+
+function restartgame() {
+	lastTimeWarningSecond = timeWarningStartTime;
+	
+	timerText.interactive = false;
+	timerText.off("pointerdown");
+	timerText.text = "";
+	timerText.style.fill = numSolvedTextStyle.fill;
+	
+	timerValue = startTime;
+	inputDisabled = false;
+	numSolved = 0;
+	numSolvedText.text = "solved: " + numSolved;
+	
+	
+	gameRunning = true;
+	loadNextPuzzle();
+}
+
+function setTextPositions() {
+	let boardEdgeBottom = boardContainer.position.y + boardContainer.height;
+	let posY = boardEdgeBottom + numSolvedText.height * .5;
+	
+	if (gameIsTimed) {
+		let boardEdgeLeft = boardContainer.position.x;
+		timerText.position.set(boardEdgeLeft+boardContainer.width*.25-timerText.width/2, posY);
+		numSolvedText.position.set(boardEdgeLeft+boardContainer.width*.75-numSolvedText.width/2, posY);
+	}
+	else {
+		numSolvedText.position.set(boardContainer.position.x + boardContainer.width/2 - numSolvedText.width/2, posY);
+	}
+}
+
+function playSound(sound) {
+	if (soundOn) {
+		sound.play();
+	}
+}

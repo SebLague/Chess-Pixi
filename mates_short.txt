@@ -1,4 +1,0 @@
-5,r1b4k/pp2N1pp/2pp4/4N3/4P3/8/PPn3PP/5BK1 w - - 0 36
-6,3R4/2q2kr1/p6Q/4P3/8/8/P5PP/5K2 w - - 0 70
-7,r2q1rk1/pppb2p1/3pP1Qp/8/8/3B4/PPP3PP/2KRb3 w - - 0 36
-8,8/8/8/8/7k/1P4R1/P2K1Q2/8 w - - 0 90
